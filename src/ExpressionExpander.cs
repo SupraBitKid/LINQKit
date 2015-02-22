@@ -9,7 +9,7 @@ using System.Reflection;
 namespace LinqKit
 {
 	/// <summary>
-	/// Custom expresssion visitor for ExpandableQuery. This expands calls to Expression.Compile() and
+	/// Custom expression visitor for ExpandableQuery. This expands calls to Expression.Compile() and
 	/// collapses captured lambda references in subqueries which LINQ to SQL can't otherwise handle.
 	/// </summary>
 	class ExpressionExpander : ExpressionVisitor
@@ -36,7 +36,7 @@ namespace LinqKit
 		protected override Expression VisitInvocation (InvocationExpression iv)
 		{
 			var target = iv.Expression;
-			if (target is MemberExpression) target = TransformExpr ((MemberExpression)target);
+			if (target is MemberExpression) target = TransformExpression ((MemberExpression)target);
 			if (target is ConstantExpression) target = ((ConstantExpression)target).Value as Expression;
 
 			var lambda = (LambdaExpression)target;
@@ -63,8 +63,11 @@ namespace LinqKit
 			if (m.Method.Name == "Invoke" && m.Method.DeclaringType == typeof (Extensions))
 			{
 				var target = m.Arguments[0];
-				if (target is MemberExpression) target = TransformExpr ((MemberExpression)target);
-				if (target is ConstantExpression) target = ((ConstantExpression) target).Value as Expression;
+				if (target is MemberExpression) 
+					target = TransformExpression ((MemberExpression)target);
+				if (target is ConstantExpression) 
+					target = ((ConstantExpression) target).Value as Expression;
+
 
 				var lambda = (LambdaExpression)target;
 
@@ -89,7 +92,7 @@ namespace LinqKit
 			if (m.Method.Name == "Compile" && m.Object is MemberExpression)
 			{
 				var me = (MemberExpression)m.Object;
-				var newExpr = TransformExpr (me);
+				var newExpr = TransformExpression (me);
 				if (newExpr != me) return newExpr;
 			}
 
@@ -104,41 +107,103 @@ namespace LinqKit
 		{
 			// Strip out any references to expressions captured by outer variables - LINQ to SQL can't handle these:
 			return m.Member.DeclaringType.Name.StartsWith ("<>") ? 
-				TransformExpr (m) 
+				TransformExpression (m) 
 				: base.VisitMemberAccess (m);
 		}
 
-		Expression TransformExpr (MemberExpression input)
+		Expression TransformExpression(MemberExpression input)
 		{
 			if (input == null)
 				return null;
 
-			var field = input.Member as FieldInfo;
+			switch( input.Member.MemberType ) {
+				case MemberTypes.Property:
+					return this.TransformPropertyExpression( input );
 
-			if (field == null) return input;
+				case MemberTypes.Field:
+					return this.TransformFieldExpression( input );
+			}
+
+			return input;
+		}
+
+		Expression TransformPropertyExpression( MemberExpression input)
+		{
+			if (input == null)
+				return null;
+
+			var propertyInfo = input.Member as PropertyInfo;
+
+			if( propertyInfo == null )
+				return input;
 
 			// Collapse captured outer variables
-			if (!input.Member.ReflectedType.IsNestedPrivate
-				|| !input.Member.ReflectedType.Name.StartsWith("<>")) // captured outer variable
-			{
-				return TryVisitExpressionFunc(input, field);
+			if( !input.Member.ReflectedType.IsNestedPrivate || !input.Member.ReflectedType.Name.StartsWith( "<>" ) ) {
+				// captured outer variable 
+				return TryVisitExpressionFunc( input, propertyInfo );
 			}
 
 			var expression = input.Expression as ConstantExpression;
-			if (expression != null)
-			{
-				var obj = expression.Value;
-				if (obj == null) return input;
-				var t = obj.GetType();
-				if (!t.IsNestedPrivate || !t.Name.StartsWith("<>")) return input;
-				var fi = (FieldInfo)input.Member;
-				var result = fi.GetValue(obj);
+			if (expression != null) {
+				var expValue = expression.Value;
+				if (expValue == null) 
+					return input;
+				var expType = expValue.GetType();
+				if (!expType.IsNestedPrivate || !expType.Name.StartsWith("<>")) 
+					return input;
+
+				object result = propertyInfo.GetValue(expValue);
+
 				var exp = result as Expression;
-				if (exp != null) return Visit(exp);
+
+				if (exp != null) 
+					return Visit(exp);
 			}
 
-			return TryVisitExpressionFunc(input, field);
+			return TryVisitExpressionFunc(input, propertyInfo);
+		}
 
+		Expression TransformFieldExpression( MemberExpression input ) {
+			if (input == null)
+				return null;
+
+			var fieldInfo = input.Member as FieldInfo;
+
+			if( fieldInfo == null )
+				return input;
+
+			// Collapse captured outer variables
+			if( !input.Member.ReflectedType.IsNestedPrivate || !input.Member.ReflectedType.Name.StartsWith( "<>" ) ) {
+				// captured outer variable 
+				return TryVisitExpressionFunc( input, fieldInfo );
+			}
+
+			var expression = input.Expression as ConstantExpression;
+
+			if (expression != null) {
+				var expValue = expression.Value;
+				if (expValue == null) 
+					return input;
+				var expType = expValue.GetType();
+				if (!expType.IsNestedPrivate || !expType.Name.StartsWith("<>")) 
+					return input;
+
+				object result = fieldInfo.GetValue(expValue);
+
+				var exp = result as Expression;
+
+				if (exp != null) 
+					return Visit(exp);
+			}
+
+			return TryVisitExpressionFunc(input, fieldInfo);
+		}
+
+		private Expression TryVisitExpressionFunc( MemberExpression input, PropertyInfo property ) {
+			if( property.PropertyType.IsSubclassOf( typeof( Expression ) ) ) 
+				return Visit( Expression.Lambda<Func<Expression>>( input ).Compile()() );
+
+			return input;
 		}
 
 		private Expression TryVisitExpressionFunc(MemberExpression input, FieldInfo field)
